@@ -1,0 +1,75 @@
+name: Process External Public Repo
+
+# 觸發條件：手動觸發 (workflow_dispatch)
+on:
+  workflow_dispatch:
+    # 定義手動觸發時需要輸入的參數
+    inputs:
+      repo_url:
+        description: '要處理的 Public 倉庫 URL (例如: https://github.com/google/googletest)'
+        required: true
+        type: string
+      file_extensions:
+        description: '要包含的副檔名清單 (用空格分隔, 例如: .h .cc .md)'
+        required: true
+        default: '.py .js .md .txt .rst' # 提供一個實用的預設值
+        type: string
+
+jobs:
+  build-and-consolidate:
+    runs-on: ubuntu-latest
+    steps:
+      # ----------------------------------------------------------------
+      # 步驟一：使用 git clone 下載外部倉庫的內容
+      # 我們不再使用 actions/checkout，因為 git clone 能更直接地處理完整的 URL
+      # ----------------------------------------------------------------
+      - name: Clone external repository
+        run: |
+          # 建立一個資料夾來存放下載的程式碼，避免混亂
+          mkdir external_repo
+          cd external_repo
+          # 使用 git clone --depth 1 只下載最新的版本，節省時間和空間
+          git clone --depth 1 ${{ github.event.inputs.repo_url }} .
+        # `.` 表示 clone 到當前目錄 (external_repo)
+
+      # ----------------------------------------------------------------
+      # 步驟二：根據輸入的副檔名，尋找並合併檔案
+      # ----------------------------------------------------------------
+      - name: Consolidate source files
+        run: |
+          # 進入已下載的倉庫資料夾
+          cd external_repo
+
+          # 準備好要輸出的檔案名稱
+          OUTPUT_FILE="consolidated_code.txt"
+          
+          # 從輸入參數中取得倉庫名稱，用於檔案標頭
+          REPO_NAME=$(basename ${{ github.event.inputs.repo_url }})
+
+          # 建立並寫入檔案標頭
+          echo "Source code consolidated from: ${{ github.event.inputs.repo_url }}" > ../${OUTPUT_FILE}
+          echo "Generated on: $(date)" >> ../${OUTPUT_FILE}
+          echo "Included extensions: ${{ github.event.inputs.file_extensions }}" >> ../${OUTPUT_FILE}
+          echo "==================================================" >> ../${OUTPUT_FILE}
+
+          # ⚠️ 核心邏輯：動態處理副檔名清單
+          # 逐一處理使用者輸入的每一個副檔名
+          for ext in ${{ github.event.inputs.file_extensions }}; do
+            # 使用 find 指令尋找所有符合目前副檔名的檔案
+            # -print0 和 xargs -0 是為了處理檔名中可能包含空格等特殊字元的情況
+            find . -type f -name "*${ext}" -print0 | while IFS= read -r -d $'\0' file; do
+              echo -e "\n\n--- FILE: ${file} ---" >> ../${OUTPUT_FILE}
+              cat "${file}" >> ../${OUTPUT_FILE}
+            done
+          done
+          
+          echo "Consolidation complete."
+
+      # ----------------------------------------------------------------
+      # 步驟三：上傳合併後的檔案作為產物
+      # ----------------------------------------------------------------
+      - name: Upload consolidated file as an artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: notebooklm-source-for-${{ github.run_id }} # 使用 Run ID 確保每次產物名稱唯一
+          path: consolidated_code.txt # 要上傳的檔案路徑
