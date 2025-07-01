@@ -12,7 +12,7 @@ on:
       file_extensions:
         description: '要包含的副檔名清單 (用空格分隔)'
         required: true
-        default: '.js .ts .jsx .tsx .py .md .mdx' # 預設包含常見的前端檔案與 MD/MDX
+        default: '.js .ts .jsx .tsx .py .md .mdx'
         type: string
       output_filename_base:
         description: '輸出的 Markdown 檔案基礎名稱 (不需加 .md 或 part)'
@@ -36,18 +36,17 @@ jobs:
 
       - name: Consolidate and Split to Markdown files
         run: |
-          # 準備環境
           cd external_repo
           mkdir ../output_parts
           
-          # 從輸入參數設定變數
           MAX_SIZE_BYTES=$((${{ github.event.inputs.max_size_mb }} * 1024 * 1024))
           FILENAME_BASE="${{ github.event.inputs.output_filename_base }}"
           PART_NUMBER=1
           CURRENT_SIZE=0
           
-          # 產生檔案清單並處理
-          find . -type f -print0 | while IFS= read -r -d $'\0' file; do
+          # 💡 優化：使用 Process Substitution (< <(find...)) 來避免 pipeline 中的 subshell 問題
+          # 這能確保 PART_NUMBER 的值在迴圈結束後依然有效。
+          while IFS= read -r -d $'\0' file; do
             should_include=false
             for ext in ${{ github.event.inputs.file_extensions }}; do
               if [[ "$file" == *"$ext" ]]; then
@@ -59,41 +58,39 @@ jobs:
             if [ "$should_include" = true ]; then
               FILE_SIZE=$(stat -c%s "$file")
 
-              # 如果加入此檔案會超限，則開啟新分片
               if (( CURRENT_SIZE + FILE_SIZE > MAX_SIZE_BYTES && CURRENT_SIZE > 0 )); then
                 PART_NUMBER=$((PART_NUMBER + 1))
                 CURRENT_SIZE=0
               fi
               
-              # 根據輸入和分片序號，動態產生輸出檔名
               OUTPUT_FILE="../output_parts/${FILENAME_BASE}_part_${PART_NUMBER}.md"
               
-              # 如果是分片的開頭，寫入主標題
               if [ $CURRENT_SIZE -eq 0 ]; then
-                echo "# ${FILENAME_BASE} (Part ${PART_NUMBER})" > ${OUTPUT_FILE}
-                echo "來源倉庫: <${{ github.event.inputs.repo_url }}>" >> ${OUTPUT_FILE}
-                echo "***" >> ${OUTPUT_FILE}
+                # 🔥 修正：為所有重新導向加上雙引號
+                echo "# ${FILENAME_BASE} (Part ${PART_NUMBER})" > "${OUTPUT_FILE}"
+                echo "來源倉庫: <${{ github.event.inputs.repo_url }}>" >> "${OUTPUT_FILE}"
+                echo "***" >> "${OUTPUT_FILE}"
               fi
 
-              # 寫入檔案路徑作為次級標題
-              echo -e "\n\n## 檔案: \`${file}\`" >> ${OUTPUT_FILE}
+              # 🔥 修正：為所有重新導向加上雙引號
+              echo -e "\n\n## 檔案: \`${file}\`" >> "${OUTPUT_FILE}"
 
-              # ⚠️ 核心邏輯：判斷檔案類型以決定格式
-              # 新增 .mdx 的判斷條件
               if [[ "$file" == *.md || "$file" == *.markdown || "$file" == *.mdx ]]; then
-                echo -e "\n" >> ${OUTPUT_FILE}
-                cat "${file}" >> ${OUTPUT_FILE}
+                echo -e "\n" >> "${OUTPUT_FILE}"
+                # 🔥 修正：為所有重新導向加上雙引號
+                cat "${file}" >> "${OUTPUT_FILE}"
               else
                 lang="${file##*.}"
-                echo -e "\n\`\`\`${lang}" >> ${OUTPUT_FILE}
-                cat "${file}" >> ${OUTPUT_FILE}
-                echo -e "\n\`\`\`" >> ${OUTPUT_FILE}
+                echo -e "\n\`\`\`${lang}" >> "${OUTPUT_FILE}"
+                # 🔥 修正：為所有重新導向加上雙引號
+                cat "${file}" >> "${OUTPUT_FILE}"
+                echo -e "\n\`\`\`" >> "${OUTPUT_FILE}"
               fi
               
-              # 更新目前分片的大小
+              # 🔥 修正：為所有變數使用加上雙引號
               CURRENT_SIZE=$(stat -c%s "${OUTPUT_FILE}")
             fi
-          done
+          done < <(find . -type f -print0) # 💡 優化：find 的輸出從這裡導入迴圈
           
           echo "Splitting complete. Generated ${PART_NUMBER} parts with base name '${FILENAME_BASE}'."
 
