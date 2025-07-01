@@ -1,9 +1,9 @@
-name: Process External Public Repo
+# .github/workflows/process-external-repo.yml
 
-# 觸發條件：手動觸發 (workflow_dispatch)
+name: Process and Split External Public Repo
+
 on:
   workflow_dispatch:
-    # 定義手動觸發時需要輸入的參數
     inputs:
       repo_url:
         description: '要處理的 Public 倉庫 URL (例如: https://github.com/google/googletest)'
@@ -12,64 +12,86 @@ on:
       file_extensions:
         description: '要包含的副檔名清單 (用空格分隔, 例如: .h .cc .md)'
         required: true
-        default: '.py .js .md .txt .rst' # 提供一個實用的預設值
+        default: '.py .js .md .txt .rst'
+        type: string
+      # 新增輸入參數：每個分片檔案的最大大小 (MB)
+      max_size_mb:
+        description: '每個分片檔案的最大大小 (MB)。NotebookLM 建議 5MB 以下。'
+        required: true
+        default: '4' # 設定一個安全的 4MB 預設值
         type: string
 
 jobs:
-  build-and-consolidate:
+  build-and-split:
     runs-on: ubuntu-latest
     steps:
-      # ----------------------------------------------------------------
-      # 步驟一：使用 git clone 下載外部倉庫的內容
-      # 我們不再使用 actions/checkout，因為 git clone 能更直接地處理完整的 URL
-      # ----------------------------------------------------------------
       - name: Clone external repository
         run: |
-          # 建立一個資料夾來存放下載的程式碼，避免混亂
           mkdir external_repo
           cd external_repo
-          # 使用 git clone --depth 1 只下載最新的版本，節省時間和空間
           git clone --depth 1 ${{ github.event.inputs.repo_url }} .
-        # `.` 表示 clone 到當前目錄 (external_repo)
 
       # ----------------------------------------------------------------
-      # 步驟二：根據輸入的副檔名，尋找並合併檔案
+      # 步驟二：智慧分片邏輯
       # ----------------------------------------------------------------
-      - name: Consolidate source files
+      - name: Consolidate and Split source files
         run: |
-          # 進入已下載的倉庫資料夾
+          # 準備環境
           cd external_repo
-
-          # 準備好要輸出的檔案名稱
-          OUTPUT_FILE="consolidated_code.txt"
+          mkdir ../output_parts # 建立一個資料夾來存放所有分片檔案
           
-          # 從輸入參數中取得倉庫名稱，用於檔案標頭
-          REPO_NAME=$(basename ${{ github.event.inputs.repo_url }})
-
-          # 建立並寫入檔案標頭
-          echo "Source code consolidated from: ${{ github.event.inputs.repo_url }}" > ../${OUTPUT_FILE}
-          echo "Generated on: $(date)" >> ../${OUTPUT_FILE}
-          echo "Included extensions: ${{ github.event.inputs.file_extensions }}" >> ../${OUTPUT_FILE}
-          echo "==================================================" >> ../${OUTPUT_FILE}
-
-          # ⚠️ 核心邏輯：動態處理副檔名清單
-          # 逐一處理使用者輸入的每一個副檔名
-          for ext in ${{ github.event.inputs.file_extensions }}; do
-            # 使用 find 指令尋找所有符合目前副檔名的檔案
-            # -print0 和 xargs -0 是為了處理檔名中可能包含空格等特殊字元的情況
-            find . -type f -name "*${ext}" -print0 | while IFS= read -r -d $'\0' file; do
-              echo -e "\n\n--- FILE: ${file} ---" >> ../${OUTPUT_FILE}
-              cat "${file}" >> ../${OUTPUT_FILE}
+          # 從輸入參數設定變數
+          MAX_SIZE_BYTES=$((${{ github.event.inputs.max_size_mb }} * 1024 * 1024))
+          PART_NUMBER=1
+          CURRENT_SIZE=0
+          
+          # 產生檔案清單，並用 while 迴圈逐一處理
+          find . -type f -print0 | while IFS= read -r -d $'\0' file; do
+            # 檢查檔案副檔名是否在我們要的清單中
+            should_include=false
+            for ext in ${{ github.event.inputs.file_extensions }}; do
+              if [[ "$file" == *"$ext" ]]; then
+                should_include=true
+                break
+              fi
             done
+            
+            # 如果副檔名符合，才進行處理
+            if [ "$should_include" = true ]; then
+              FILE_SIZE=$(stat -c%s "$file")
+
+              # ⚠️ 核心邏輯：如果加入這個檔案會超過大小上限，就開一個新檔案
+              # (並且確保目前檔案不是空的，避免因單一大檔案而產生空的分片)
+              if (( CURRENT_SIZE + FILE_SIZE > MAX_SIZE_BYTES && CURRENT_SIZE > 0 )); then
+                PART_NUMBER=$((PART_NUMBER + 1))
+                CURRENT_SIZE=0
+              fi
+              
+              OUTPUT_FILE="../output_parts/part_${PART_NUMBER}.txt"
+              
+              # 如果是分片的開頭，加入標頭資訊
+              if [ $CURRENT_SIZE -eq 0 ]; then
+                echo "Source code from: ${{ github.event.inputs.repo_url }}" > ${OUTPUT_FILE}
+                echo "Part ${PART_NUMBER}" >> ${OUTPUT_FILE}
+                echo "==================================================" >> ${OUTPUT_FILE}
+              fi
+
+              # 將檔案內容附加到目前的分片檔案中
+              echo -e "\n\n--- FILE: ${file} ---" >> ${OUTPUT_FILE}
+              cat "${file}" >> ${OUTPUT_FILE}
+              
+              # 更新目前分片檔案的大小
+              CURRENT_SIZE=$((CURRENT_SIZE + FILE_SIZE))
+            fi
           done
           
-          echo "Consolidation complete."
+          echo "Splitting complete. Generated ${PART_NUMBER} parts."
 
       # ----------------------------------------------------------------
-      # 步驟三：上傳合併後的檔案作為產物
+      # 步驟三：上傳包含所有分片檔案的整個資料夾
       # ----------------------------------------------------------------
-      - name: Upload consolidated file as an artifact
+      - name: Upload all parts as a single artifact
         uses: actions/upload-artifact@v4
         with:
-          name: notebooklm-source-for-${{ github.run_id }} # 使用 Run ID 確保每次產物名稱唯一
-          path: consolidated_code.txt # 要上傳的檔案路徑
+          name: notebooklm-parts-for-${{ github.run_id }}
+          path: output_parts/ # 上傳整個資料夾
