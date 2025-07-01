@@ -1,28 +1,31 @@
-# .github/workflows/process-external-repo.yml
+# .github/workflows/consolidate-to-markdown-split.yml
 
-name: Process and Split External Public Repo
+name: Consolidate to Split Markdown Files
 
 on:
   workflow_dispatch:
     inputs:
       repo_url:
-        description: '要處理的 Public 倉庫 URL (例如: https://github.com/google/googletest)'
+        description: '要處理的 Public 倉庫 URL (例如: https://github.com/facebook/docusaurus)'
         required: true
         type: string
       file_extensions:
-        description: '要包含的副檔名清單 (用空格分隔, 例如: .h .cc .md)'
+        description: '要包含的副檔名清單 (用空格分隔)'
         required: true
-        default: '.py .js .md .txt .rst'
+        default: '.js .ts .jsx .tsx .py .md .mdx' # 預設包含常見的前端檔案與 MD/MDX
         type: string
-      # 新增輸入參數：每個分片檔案的最大大小 (MB)
+      output_filename_base:
+        description: '輸出的 Markdown 檔案基礎名稱 (不需加 .md 或 part)'
+        required: true
+        default: 'consolidated-docs'
       max_size_mb:
         description: '每個分片檔案的最大大小 (MB)。NotebookLM 建議 5MB 以下。'
         required: true
-        default: '4' # 設定一個安全的 4MB 預設值
+        default: '4'
         type: string
 
 jobs:
-  build-and-split:
+  build-and-split-markdown:
     runs-on: ubuntu-latest
     steps:
       - name: Clone external repository
@@ -31,23 +34,20 @@ jobs:
           cd external_repo
           git clone --depth 1 ${{ github.event.inputs.repo_url }} .
 
-      # ----------------------------------------------------------------
-      # 步驟二：智慧分片邏輯
-      # ----------------------------------------------------------------
-      - name: Consolidate and Split source files
+      - name: Consolidate and Split to Markdown files
         run: |
           # 準備環境
           cd external_repo
-          mkdir ../output_parts # 建立一個資料夾來存放所有分片檔案
+          mkdir ../output_parts
           
           # 從輸入參數設定變數
           MAX_SIZE_BYTES=$((${{ github.event.inputs.max_size_mb }} * 1024 * 1024))
+          FILENAME_BASE="${{ github.event.inputs.output_filename_base }}"
           PART_NUMBER=1
           CURRENT_SIZE=0
           
-          # 產生檔案清單，並用 while 迴圈逐一處理
+          # 產生檔案清單並處理
           find . -type f -print0 | while IFS= read -r -d $'\0' file; do
-            # 檢查檔案副檔名是否在我們要的清單中
             should_include=false
             for ext in ${{ github.event.inputs.file_extensions }}; do
               if [[ "$file" == *"$ext" ]]; then
@@ -56,42 +56,49 @@ jobs:
               fi
             done
             
-            # 如果副檔名符合，才進行處理
             if [ "$should_include" = true ]; then
               FILE_SIZE=$(stat -c%s "$file")
 
-              # ⚠️ 核心邏輯：如果加入這個檔案會超過大小上限，就開一個新檔案
-              # (並且確保目前檔案不是空的，避免因單一大檔案而產生空的分片)
+              # 如果加入此檔案會超限，則開啟新分片
               if (( CURRENT_SIZE + FILE_SIZE > MAX_SIZE_BYTES && CURRENT_SIZE > 0 )); then
                 PART_NUMBER=$((PART_NUMBER + 1))
                 CURRENT_SIZE=0
               fi
               
-              OUTPUT_FILE="../output_parts/part_${PART_NUMBER}.txt"
+              # 根據輸入和分片序號，動態產生輸出檔名
+              OUTPUT_FILE="../output_parts/${FILENAME_BASE}_part_${PART_NUMBER}.md"
               
-              # 如果是分片的開頭，加入標頭資訊
+              # 如果是分片的開頭，寫入主標題
               if [ $CURRENT_SIZE -eq 0 ]; then
-                echo "Source code from: ${{ github.event.inputs.repo_url }}" > ${OUTPUT_FILE}
-                echo "Part ${PART_NUMBER}" >> ${OUTPUT_FILE}
-                echo "==================================================" >> ${OUTPUT_FILE}
+                echo "# ${FILENAME_BASE} (Part ${PART_NUMBER})" > ${OUTPUT_FILE}
+                echo "來源倉庫: <${{ github.event.inputs.repo_url }}>" >> ${OUTPUT_FILE}
+                echo "***" >> ${OUTPUT_FILE}
               fi
 
-              # 將檔案內容附加到目前的分片檔案中
-              echo -e "\n\n--- FILE: ${file} ---" >> ${OUTPUT_FILE}
-              cat "${file}" >> ${OUTPUT_FILE}
+              # 寫入檔案路徑作為次級標題
+              echo -e "\n\n## 檔案: \`${file}\`" >> ${OUTPUT_FILE}
+
+              # ⚠️ 核心邏輯：判斷檔案類型以決定格式
+              # 新增 .mdx 的判斷條件
+              if [[ "$file" == *.md || "$file" == *.markdown || "$file" == *.mdx ]]; then
+                echo -e "\n" >> ${OUTPUT_FILE}
+                cat "${file}" >> ${OUTPUT_FILE}
+              else
+                lang="${file##*.}"
+                echo -e "\n\`\`\`${lang}" >> ${OUTPUT_FILE}
+                cat "${file}" >> ${OUTPUT_FILE}
+                echo -e "\n\`\`\`" >> ${OUTPUT_FILE}
+              fi
               
-              # 更新目前分片檔案的大小
-              CURRENT_SIZE=$((CURRENT_SIZE + FILE_SIZE))
+              # 更新目前分片的大小
+              CURRENT_SIZE=$(stat -c%s "${OUTPUT_FILE}")
             fi
           done
           
-          echo "Splitting complete. Generated ${PART_NUMBER} parts."
+          echo "Splitting complete. Generated ${PART_NUMBER} parts with base name '${FILENAME_BASE}'."
 
-      # ----------------------------------------------------------------
-      # 步驟三：上傳包含所有分片檔案的整個資料夾
-      # ----------------------------------------------------------------
-      - name: Upload all parts as a single artifact
+      - name: Upload all Markdown parts as a single artifact
         uses: actions/upload-artifact@v4
         with:
-          name: notebooklm-parts-for-${{ github.run_id }}
-          path: output_parts/ # 上傳整個資料夾
+          name: markdown-parts-for-${{ github.event.inputs.output_filename_base }}
+          path: output_parts/
